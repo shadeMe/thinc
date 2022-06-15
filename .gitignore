@@ -36,6 +36,7 @@ website/_deploy.sh
 # Cython / C extensions
 cythonize.json
 *.cpp
+!thinc/backends/cblas_impl.cpp
 *.so
 *.so.1
 
