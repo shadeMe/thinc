@@ -6,6 +6,10 @@ ctypedef void (*sgemm_ptr)(bint transA, bint transB, int M, int N, int K,
                            int ldb, float beta, float* C, int ldc) nogil
 
 
+ctypedef void (*daxpy_ptr)(int N, double alpha, const double* X, int incX,
+                           double *Y, int incY) nogil
+
+
 ctypedef void (*saxpy_ptr)(int N, float alpha, const float* X, int incX,
                            float *Y, int incY) nogil
 
@@ -16,9 +20,18 @@ ctypedef void (*saxpy_ptr)(int N, float alpha, const float* X, int incX,
 cdef struct BlasFuncs
 
 
+
+cdef extern from "cblas_impl.hh":
+    cdef cppclass CBlasImpl:
+        CBlas() nogil
+        daxpy_ptr daxpy() nogil
+        saxpy_ptr saxpy() nogil
+        sgemm_ptr sgemm() nogil
+        void set_daxpy(daxpy_ptr daxpy) nogil
+        void set_saxpy(saxpy_ptr saxpy) nogil
+        void set_sgemm(sgemm_ptr sgemm) nogil
+
+
 cdef class CBlas:
-    cdef shared_ptr[BlasFuncs] ptr
-    cdef saxpy_ptr saxpy(self) nogil
-    cdef sgemm_ptr sgemm(self) nogil
-    cdef void set_saxpy(self, saxpy_ptr saxpy) nogil
-    cdef void set_sgemm(self, sgemm_ptr sgemm) nogil
+    cdef CBlasImpl c_impl
+    cdef CBlasImpl c(self) nogil
