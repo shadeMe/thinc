@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Any, Dict, List, Optional
 import catalogue
 import contextlib
@@ -6,8 +7,8 @@ from io import BytesIO
 import numpy
 
 from ..backends import Ops, get_current_ops
-from ..optimizers import Optimizer
-from ..types import ArgsKwargs, ArrayXd
+from ..optimizers import Optimizer, OptimizerParamInfo
+from ..types import ArgsKwargs, ArrayXd, FloatsXd
 from ..util import get_array_module
 from .shim import Shim
 from ..compat import tensorflow as tf
@@ -148,16 +149,24 @@ class TensorFlowShim(Shim):
             params.append(param.ravel())
             grads.append(grad.ravel())
         xp = get_array_module(params[0])
-        flat_params, flat_grads = optimizer(
-            (self.id, "tensorflow-shim"), xp.concatenate(params), xp.concatenate(grads)
+
+        def param_update_callback(flat_params: FloatsXd):
+            assert self.gradients is not None
+            start = 0
+            for grad, variable in zip(self.gradients, self._model.trainable_variables):
+                size, shape = shapes.pop(0)
+                param = flat_params[start : start + size].reshape(shape)
+                variable.assign(param)
+                start += size
+            self.gradients = None
+
+        param_info = OptimizerParamInfo(
+            (self.id, "tensorflow-shim"),
+            param=xp.concatenate(params),
+            grad=xp.concatenate(grads),
+            update_callback=param_update_callback,
         )
-        start = 0
-        for grad, variable in zip(self.gradients, self._model.trainable_variables):
-            size, shape = shapes.pop(0)
-            param = flat_params[start : start + size].reshape(shape)
-            variable.assign(param)
-            start += size
-        self.gradients = None
+        optimizer.register_param(param_info)
 
     def _load_weights_from_state_dict(
         self, state_dict: Optional[Dict[str, ArrayXd]] = None

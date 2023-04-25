@@ -1,6 +1,7 @@
 import pytest
-from thinc.api import registry, Optimizer
-from thinc.optimizers import KeyT, _wrap_generator
+from thinc.api import registry
+from thinc.optimizers.types import KeyT
+from thinc.optimizers.thinc_optimizer import _wrap_generator, ThincOptimizer
 import numpy
 
 
@@ -77,9 +78,9 @@ def test_optimizer_schedules_from_config(schedule_config_valid):
     cfg = {"@optimizers": "Adam.v1", "learn_rate": lr}
     optimizer = registry.resolve({"cfg": cfg})["cfg"]
     assert optimizer.learn_rate(step=optimizer._step, key=STUB_KEY) == lr_next1
-    optimizer.step_schedules()
+    optimizer.step()
     assert optimizer.learn_rate(step=optimizer._step, key=STUB_KEY) == lr_next2
-    optimizer.step_schedules()
+    optimizer.step()
     assert optimizer.learn_rate(step=optimizer._step, key=STUB_KEY) == lr_next3
     optimizer.learn_rate = lambda *, step, key: 1.0
     assert optimizer.learn_rate(step=optimizer._step, key=STUB_KEY) == 1.0
@@ -87,11 +88,11 @@ def test_optimizer_schedules_from_config(schedule_config_valid):
 
 def test_optimizer_schedules_valid(schedule_valid):
     lr, lr_next1, lr_next2, lr_next3 = schedule_valid
-    optimizer = Optimizer(learn_rate=lr)
+    optimizer = ThincOptimizer(learn_rate=lr)
     assert optimizer.learn_rate(step=optimizer._step, key=STUB_KEY) == lr_next1
-    optimizer.step_schedules()
+    optimizer.step()
     assert optimizer.learn_rate(step=optimizer._step, key=STUB_KEY) == lr_next2
-    optimizer.step_schedules()
+    optimizer.step()
     assert optimizer.learn_rate(step=optimizer._step, key=STUB_KEY) == lr_next3
     optimizer.learn_rate = lambda *, step, key: 1.0
     assert optimizer.learn_rate(step=optimizer._step, key=STUB_KEY) == 1.0
@@ -99,11 +100,11 @@ def test_optimizer_schedules_valid(schedule_valid):
 
 def test_optimizer_schedules_invalid(schedule_invalid):
     with pytest.raises(ValueError):
-        Optimizer(learn_rate=schedule_invalid)
+        ThincOptimizer(learn_rate=schedule_invalid)
 
 
 def test_optimizer_init():
-    optimizer = Optimizer(
+    optimizer = ThincOptimizer(
         learn_rate=0.123,
         use_averages=False,
         use_radam=True,
@@ -115,20 +116,20 @@ def test_optimizer_init():
     W = numpy.asarray([1.0, 0.0, 0.0, 1.0], dtype="f").reshape((4,))
     dW = numpy.asarray([[-1.0, 0.0, 0.0, 1.0]], dtype="f").reshape((4,))
     optimizer((0, "x"), W, dW)
-    optimizer = Optimizer(learn_rate=0.123, beta1=0.1, beta2=0.1)
+    optimizer = ThincOptimizer(learn_rate=0.123, beta1=0.1, beta2=0.1)
     optimizer((1, "x"), W, dW)
 
 
 def test_optimizer_last_score():
-    optimizer = Optimizer(
+    optimizer = ThincOptimizer(
         learn_rate=0.123,
     )
 
     assert optimizer.last_score is None
     optimizer.last_score = 1.0
     assert optimizer.last_score == (0, 1.0)
-    optimizer.step_schedules()
-    optimizer.step_schedules()
+    optimizer.step()
+    optimizer.step()
     assert optimizer.last_score == (0, 1.0)
     optimizer.last_score = 2.0
     assert optimizer.last_score == (2, 2.0)

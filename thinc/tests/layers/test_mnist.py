@@ -92,6 +92,8 @@ def test_small_end_to_end(width, nb_epoch, min_score, create_model, mnist):
             backprop(Yh - Y)
             model.finish_update(optimizer)
             losses.append(((Yh - Y) ** 2).sum())
+            optimizer.step()
+
         correct = 0
         total = 0
         for X, Y in model.ops.multibatch(batch_size, dev_X, dev_Y):

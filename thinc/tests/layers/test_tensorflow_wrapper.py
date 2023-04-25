@@ -110,6 +110,7 @@ def test_tensorflow_wrapper_train_overfits(model, X, Y, answer):
         d_guesses = (guesses - Y) / guesses.shape[0]
         backprop(d_guesses)
         model.finish_update(optimizer)
+        optimizer.step()
     predicted = model.predict(X).argmax()
     assert predicted == answer
 
@@ -133,6 +134,7 @@ def test_tensorflow_wrapper_accumulate_gradients(model, X, Y, answer):
 
     # Apply the gradients
     model.finish_update(optimizer)
+    optimizer.step()
     assert model.shims[0].gradients is None
 
     # Compare prev/next pairs and ensure their gradients have changed
@@ -189,6 +191,7 @@ def test_tensorflow_wrapper_serialize_model_subclass(
         d_guesses = (guesses - Y) / guesses.shape[0]
         backprop(d_guesses)
         model.finish_update(optimizer)
+        optimizer.step()
     predicted = model.predict(X).argmax()
     assert predicted == answer
 
@@ -347,6 +350,7 @@ def test_tensorflow_wrapper_use_params(model, X, Y, answer):
         d_guesses = (guesses - Y) / guesses.shape[0]
         backprop(d_guesses)
         model.finish_update(optimizer)
+        optimizer.step()
     with model.use_params(optimizer.averages):
         predicted = model.predict(X).argmax()
     assert predicted == answer

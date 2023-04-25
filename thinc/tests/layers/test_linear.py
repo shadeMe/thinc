@@ -50,18 +50,16 @@ def test_finish_update_calls_optimizer_with_weights(W_b_input):
     W, b, input_ = W_b_input
     output, finish_update = model.begin_update(input_)
 
-    seen_keys = set()
-
-    def sgd(key, data, gradient, **kwargs):
-        seen_keys.add(key)
-        assert data.shape == gradient.shape
-        return data, gradient
+    sgd = SGD(1.0, L2=0.0, grad_clip=0.0)
 
     grad_BO = numpy.ones((nr_batch, nr_out), dtype="f")
     grad_BI = finish_update(grad_BO)  # noqa: F841
     model.finish_update(sgd)
+
     for name in model.param_names:
-        assert (model.id, name) in seen_keys
+        data = sgd._registered_params.get((model.id, name))
+        assert data is not None
+        assert data.parameter.shape == data.gradient.shape
 
 
 @settings(max_examples=100)
@@ -189,8 +187,7 @@ def test_update():
     model = Linear(2, 2)
     model.set_param("W", W)
     model.set_param("b", bias)
-    sgd = SGD(1.0, L2=0.0, grad_clip=0.0)
-    sgd.averages = None
+    sgd = SGD(1.0, L2=0.0, grad_clip=0.0, use_averages=False)
 
     ff = numpy.asarray([[0.0, 0.0]], dtype="f")
     tf = numpy.asarray([[1.0, 0.0]], dtype="f")

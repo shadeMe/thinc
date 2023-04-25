@@ -9,7 +9,7 @@ import functools
 import threading
 
 from .backends import ParamServer, Ops, NumpyOps, CupyOps, get_current_ops
-from .optimizers import Optimizer  # noqa: F401
+from .optimizers import Optimizer, OptimizerParamInfo  # noqa: F401
 from .shims import Shim
 from .util import convert_recursive, is_xp_array, DATA_VALIDATION
 from .util import partial, validate_fwd_input_output
@@ -318,16 +318,25 @@ class Model(Generic[InT, OutT]):
         """Update parameters with current gradients. The optimizer is called
         with each parameter and gradient of the model.
         """
+
+        def param_update_callback(param: FloatsXd, node: Model, name: str):
+            node.set_param(name, param)
+
         for node in self.walk():
             for shim in node.shims:
                 shim.finish_update(optimizer)
         for node in self.walk():
             for name in node.param_names:
                 if node.has_grad(name):
-                    param, grad = optimizer(
-                        (node.id, name), node.get_param(name), node.get_grad(name)
+                    param_info = OptimizerParamInfo(
+                        (node.id, name),
+                        param=node.get_param(name),
+                        grad=node.get_grad(name),
+                        update_callback=partial(
+                            param_update_callback, node=node, name=name
+                        ),
                     )
-                    node.set_param(name, param)
+                    optimizer.register_param(param_info)
 
     @contextlib.contextmanager
     def use_params(self, params: Dict[Tuple[int, str], FloatsXd]):

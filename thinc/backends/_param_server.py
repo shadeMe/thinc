@@ -8,7 +8,7 @@ KeyT = Tuple[int, str]
 
 
 class ParamServer:
-    """Serve parameters for a single process."""
+    """Serve parameters for a single Model."""
 
     _params: Dict[KeyT, FloatsXd] = {}
     _grads: Dict[KeyT, FloatsXd] = {}

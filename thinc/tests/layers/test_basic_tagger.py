@@ -70,6 +70,7 @@ def test_small_end_to_end(depth, width, vector_width, nb_epoch, create_model, an
                 losses[-1] += ((Yh[i] - Y[i]) ** 2).sum()
             backprop(d_loss)
             model.finish_update(optimizer)
+            optimizer.step()
         scores.append(evaluate_tagger(model, dev_X, dev_Y, batch_size))
     assert losses[-1] < losses[0]
     assert scores[-1] > scores[0]

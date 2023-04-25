@@ -4,7 +4,7 @@ import copy
 
 from ..util import mxnet2xp, convert_recursive, make_tempfile, xp2mxnet
 from ..util import get_array_module
-from ..optimizers import Optimizer
+from ..optimizers import Optimizer, OptimizerParamInfo
 from ..types import ArgsKwargs, FloatsXd
 from .shim import Shim
 from ..compat import mxnet as mx
@@ -65,16 +65,23 @@ class MXNetShim(Shim):
         if not params:
             return
         xp = get_array_module(params[0])
-        flat_params, flat_grads = optimizer(
-            (self.id, "mxnet-shim"), xp.concatenate(params), xp.concatenate(grads)
+
+        def param_update_callback(flat_params: FloatsXd):
+            start = 0
+            for key, value in self._model.collect_params().items():
+                size, shape = shapes.pop(0)
+                param = cast(FloatsXd, flat_params[start : start + size].reshape(shape))
+                value.set_data(xp2mxnet(param))
+                value.zero_grad()
+                start += size
+
+        param_info = OptimizerParamInfo(
+            (self.id, "mxnet-shim"),
+            param=xp.concatenate(params),
+            grad=xp.concatenate(grads),
+            update_callback=param_update_callback,
         )
-        start = 0
-        for key, value in self._model.collect_params().items():
-            size, shape = shapes.pop(0)
-            param = flat_params[start : start + size].reshape(shape)
-            value.set_data(xp2mxnet(param))
-            value.zero_grad()
-            start += size
+        optimizer.register_param(param_info)
 
     def copy(self, ctx: "mx.context.Context" = None):
         if ctx is None:

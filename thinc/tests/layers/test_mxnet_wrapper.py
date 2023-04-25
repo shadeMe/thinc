@@ -113,6 +113,7 @@ def test_mxnet_wrapper_train_overfits(
         d_guesses = (guesses - Y) / guesses.shape[0]
         backprop(d_guesses)
         model.finish_update(optimizer)
+        optimizer.step()
     predicted = model.predict(X).argmax()
     assert predicted == answer
 

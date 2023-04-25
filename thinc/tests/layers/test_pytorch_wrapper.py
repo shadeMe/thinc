@@ -48,6 +48,7 @@ def check_learns_zero_output(model, sgd, X, Y):
         total = numpy.abs(Yh.sum())
         dX = get_dX(Yh - Y)  # noqa: F841
         model.finish_update(sgd)
+        sgd.step()
     assert total < prev
 
 

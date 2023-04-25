@@ -27,6 +27,7 @@ def test_basic(instances, sgd):
     loss1 = ((yh - y) ** 2).sum()
     backprop(yh - y)
     model.finish_update(sgd)
+    sgd.step()
     yh, backprop = model.begin_update(X)
     loss2 = ((yh - y) ** 2).sum()
     assert loss2 < loss1

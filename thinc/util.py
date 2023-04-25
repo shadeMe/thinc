@@ -18,7 +18,15 @@ from .compat import has_cupy, has_mxnet, has_torch, has_tensorflow
 from .compat import has_cupy_gpu, has_torch_cuda_gpu, has_gpu
 from .compat import torch, cupy, tensorflow as tf, mxnet as mx, cupy_from_dlpack
 
-from .types import ArrayXd, ArgsKwargs, Ragged, Padded, FloatsXd, IntsXd, Floats2d  # noqa: E402
+from .types import (
+    ArrayXd,
+    ArgsKwargs,
+    Ragged,
+    Padded,
+    FloatsXd,
+    IntsXd,
+    Floats2d,
+)  # noqa: E402
 from . import types  # noqa: E402
 
 if TYPE_CHECKING:
@@ -376,6 +384,8 @@ def xp2torch(
     xp_tensor: ArrayXd,
     requires_grad: bool = False,
     device: Optional["torch.device"] = None,
+    *,
+    allow_copy=True,
 ) -> "torch.Tensor":  # pragma: no cover
     """Convert a numpy or cupy tensor to a PyTorch tensor."""
     assert_pytorch_installed()
@@ -388,6 +398,8 @@ def xp2torch(
         torch_tensor = torch.utils.dlpack.from_dlpack(dlpack_tensor)
     elif hasattr(xp_tensor, "__dlpack__"):
         torch_tensor = torch.utils.dlpack.from_dlpack(xp_tensor)
+    elif not allow_copy:
+        raise ValueError("Cannot convert XP tensor to Torch tensor without copying")
     else:
         torch_tensor = torch.from_numpy(xp_tensor)
 
@@ -400,7 +412,7 @@ def xp2torch(
 
 
 def torch2xp(
-    torch_tensor: "torch.Tensor", *, ops: Optional["Ops"] = None
+    torch_tensor: "torch.Tensor", *, ops: Optional["Ops"] = None, allow_copy=True
 ) -> ArrayXd:  # pragma: no cover
     """Convert a torch tensor to a numpy or cupy tensor depending on the `ops` parameter.
     If `ops` is `None`, the type of the resultant tensor will be determined by the source tensor's device.
@@ -410,9 +422,15 @@ def torch2xp(
     assert_pytorch_installed()
     if is_torch_cuda_array(torch_tensor):
         if isinstance(ops, NumpyOps):
+            if not allow_copy:
+                raise ValueError(
+                    "Cannot convert XP tensor to Torch tensor without copying"
+                )
             return torch_tensor.detach().cpu().numpy()
         else:
             return cupy_from_dlpack(torch.utils.dlpack.to_dlpack(torch_tensor))
+    elif not allow_copy:
+        raise ValueError("Cannot convert Torch tensor to XP tensor without copying")
     else:
         if isinstance(ops, NumpyOps) or ops is None:
             return torch_tensor.detach().cpu().numpy()
@@ -421,7 +439,11 @@ def torch2xp(
 
 
 def xp2tensorflow(
-    xp_tensor: ArrayXd, requires_grad: bool = False, as_variable: bool = False
+    xp_tensor: ArrayXd,
+    requires_grad: bool = False,
+    as_variable: bool = False,
+    *,
+    allow_copy=True,
 ) -> "tf.Tensor":  # pragma: no cover
     """Convert a numpy or cupy tensor to a TensorFlow Tensor or Variable"""
     assert_tensorflow_installed()
@@ -431,6 +453,10 @@ def xp2tensorflow(
     elif hasattr(xp_tensor, "__dlpack__"):
         dlpack_tensor = xp_tensor.__dlpack__()  # type: ignore
         tf_tensor = tf.experimental.dlpack.from_dlpack(dlpack_tensor)
+    elif not allow_copy:
+        raise ValueError(
+            "Cannot convert XP tensor to Tensorflow tensor without copying"
+        )
     else:
         tf_tensor = tf.convert_to_tensor(xp_tensor)
     if as_variable:
@@ -447,7 +473,7 @@ def xp2tensorflow(
 
 
 def tensorflow2xp(
-    tf_tensor: "tf.Tensor", *, ops: Optional["Ops"] = None
+    tf_tensor: "tf.Tensor", *, ops: Optional["Ops"] = None, allow_copy=True
 ) -> ArrayXd:  # pragma: no cover
     """Convert a Tensorflow tensor to numpy or cupy tensor depending on the `ops` parameter.
     If `ops` is `None`, the type of the resultant tensor will be determined by the source tensor's device.
@@ -457,10 +483,18 @@ def tensorflow2xp(
     assert_tensorflow_installed()
     if is_tensorflow_gpu_array(tf_tensor):
         if isinstance(ops, NumpyOps):
+            if not allow_copy:
+                raise ValueError(
+                    "Cannot convert Tensorflow tensor to XP tensor without copying"
+                )
             return tf_tensor.numpy()
         else:
             dlpack_tensor = tf.experimental.dlpack.to_dlpack(tf_tensor)
             return cupy_from_dlpack(dlpack_tensor)
+    elif not allow_copy:
+        raise ValueError(
+            "Cannot convert Tensorflow tensor to XP tensor without copying"
+        )
     else:
         if isinstance(ops, NumpyOps) or ops is None:
             return tf_tensor.numpy()
@@ -469,13 +503,15 @@ def tensorflow2xp(
 
 
 def xp2mxnet(
-    xp_tensor: ArrayXd, requires_grad: bool = False
+    xp_tensor: ArrayXd, requires_grad: bool = False, *, allow_copy=True
 ) -> "mx.nd.NDArray":  # pragma: no cover
     """Convert a numpy or cupy tensor to a MXNet tensor."""
     assert_mxnet_installed()
     if hasattr(xp_tensor, "toDlpack"):
         dlpack_tensor = xp_tensor.toDlpack()  # type: ignore
         mx_tensor = mx.nd.from_dlpack(dlpack_tensor)
+    elif not allow_copy:
+        raise ValueError("Cannot convert XP tensor to MXNet tensor without copying")
     else:
         mx_tensor = mx.nd.from_numpy(xp_tensor)
     if requires_grad:
@@ -484,7 +520,7 @@ def xp2mxnet(
 
 
 def mxnet2xp(
-    mx_tensor: "mx.nd.NDArray", *, ops: Optional["Ops"] = None
+    mx_tensor: "mx.nd.NDArray", *, ops: Optional["Ops"] = None, allow_copy=True
 ) -> ArrayXd:  # pragma: no cover
     """Convert a MXNet tensor to a numpy or cupy tensor."""
     from .api import NumpyOps
@@ -492,9 +528,15 @@ def mxnet2xp(
     assert_mxnet_installed()
     if is_mxnet_gpu_array(mx_tensor):
         if isinstance(ops, NumpyOps):
+            if not allow_copy:
+                raise ValueError(
+                    "Cannot convert MXNet tensor to XP tensor without copying"
+                )
             return mx_tensor.detach().asnumpy()
         else:
             return cupy_from_dlpack(mx_tensor.to_dlpack_for_write())
+    elif not allow_copy:
+        raise ValueError("Cannot convert MXNet tensor to XP tensor without copying")
     else:
         if isinstance(ops, NumpyOps) or ops is None:
             return mx_tensor.detach().asnumpy()

@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Any, Dict, Optional, cast, Callable
 import contextlib
 from io import BytesIO
@@ -9,7 +10,7 @@ from ..util import get_torch_default_device
 from ..compat import torch
 from ..backends import get_current_ops, context_pools, CupyOps
 from ..backends import set_gpu_allocator
-from ..optimizers import Optimizer
+from ..optimizers import Optimizer, OptimizerParamInfo
 from ..types import ArgsKwargs, FloatsXd
 from .pytorch_grad_scaler import PyTorchGradScaler
 from .shim import Shim
@@ -157,20 +158,29 @@ class PyTorchShim(Shim):
         return output, backprop
 
     def finish_update(self, optimizer: Optimizer):
+        def param_update_callback(param: FloatsXd, torch_data: "torch.Tensor"):
+            torch_data.data = xp2torch(
+                param, requires_grad=True, device=torch_data.device
+            )
+            assert torch_data.grad is not None
+            torch_data.grad.zero_()
+
         for name, torch_data in self._model.named_parameters():
             if torch_data.grad is not None:
                 if (
                     not self._grad_scaler.found_inf
                 ):  # Skip weight update if any gradient overflowed.
-                    param, grad = optimizer(
+                    param_info = OptimizerParamInfo(
                         (self.id, name),
-                        cast(FloatsXd, torch2xp(torch_data.data)),
-                        cast(FloatsXd, torch2xp(torch_data.grad)),
+                        param=torch2xp(torch_data.data),
+                        grad=torch2xp(torch_data.grad),
+                        update_callback=partial(
+                            param_update_callback, torch_data=torch_data
+                        ),
                     )
-                    torch_data.data = xp2torch(
-                        param, requires_grad=True, device=torch_data.device
-                    )
-                torch_data.grad.zero_()
+                    optimizer.register_param(param_info)
+                else:
+                    torch_data.grad.zero_()
 
         self._grad_scaler.update()
 

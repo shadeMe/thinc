@@ -1,17 +1,19 @@
-from typing import Any, Dict, Optional, Union, Tuple, List, cast
+from typing import Any, Dict, Iterable, Optional, Union, Tuple, List, cast
 from collections import defaultdict
 import itertools
 import math
 from types import GeneratorType
 
-from .backends import get_array_ops
-from .types import Generator, FloatsXd
-from .config import registry
-from .schedules import constant, Schedule
+from .types import KeyT, ScheduleT
+from .abc import Optimizer
+from .param import OptimizerParamInfo
 
+from ..backends import get_array_ops
+from ..types import Generator, FloatsXd
+from ..config import registry
+from ..schedules import constant, Schedule
+from ..util import is_xp_array
 
-KeyT = Tuple[int, str]
-ScheduleT = Union[float, List[float], Generator, Schedule]
 
 SGD_DEFAULTS: Dict[str, Union[float, bool, int]] = {
     "L2": 0.0,
@@ -43,7 +45,7 @@ def RAdam(
     grad_clip: ScheduleT = ADAM_DEFAULTS["grad_clip"],
     use_averages: bool = True,
 ):
-    return Optimizer(
+    return ThincOptimizer(
         learn_rate,
         beta1=beta1,
         beta2=beta2,
@@ -68,7 +70,7 @@ def Adam(
     L2_is_weight_decay: bool = cast(bool, ADAM_DEFAULTS["L2_is_weight_decay"]),
     use_averages: bool = True,
 ):
-    return Optimizer(
+    return ThincOptimizer(
         learn_rate,
         L2=L2,
         beta1=beta1,
@@ -90,7 +92,7 @@ def SGD(
     L2_is_weight_decay: bool = cast(bool, SGD_DEFAULTS["L2_is_weight_decay"]),
     use_averages: bool = True,
 ):
-    return Optimizer(
+    return ThincOptimizer(
         learn_rate,
         L2=L2,
         grad_clip=grad_clip,
@@ -101,19 +103,19 @@ def SGD(
     )
 
 
-class Optimizer(object):
+class ThincOptimizer(Optimizer):
     """Do various flavours of stochastic gradient descent, with first and
     second order momentum. Currently support 'vanilla' SGD, Adam, and RAdam.
     """
 
     mom1: Dict[KeyT, FloatsXd]
     mom2: Dict[KeyT, FloatsXd]
-    averages: Optional[Dict[KeyT, FloatsXd]]
+    _averages: Optional[Dict[KeyT, FloatsXd]]
     schedules: Dict[str, Generator]
     nr_update: Dict[KeyT, int]
     last_seen: Dict[KeyT, int]
     grad_clip: Schedule
-    learn_rate: Schedule
+    _learn_rate: Schedule
     b1: Schedule
     b2: Schedule
     eps: Schedule
@@ -129,12 +131,12 @@ class Optimizer(object):
     __slots__ = [
         "mom1",
         "mom2",
-        "averages",
+        "_averages",
         "schedules",
         "nr_update",
         "last_seen",
         "grad_clip",
-        "learn_rate",
+        "_learn_rate",
         "b1",
         "b2",
         "eps",
@@ -144,6 +146,7 @@ class Optimizer(object):
         "_radam_buffer",
         "_step",
         "_last_score",
+        "_registered_params",
     ]
 
     def __init__(
@@ -178,13 +181,13 @@ class Optimizer(object):
         self.mom1 = {}
         self.mom2 = {}
         if use_averages:
-            self.averages = {}
+            self._averages = {}
         else:
-            self.averages = None
+            self._averages = None
         self.nr_update = defaultdict(int)
         self.last_seen = defaultdict(int)
         self._set_attr_or_schedule("grad_clip", grad_clip)
-        self._set_attr_or_schedule("learn_rate", learn_rate)
+        self._set_attr_or_schedule("_learn_rate", learn_rate)
         self._set_attr_or_schedule("b1", beta1)
         self._set_attr_or_schedule("b2", beta2)
         self._set_attr_or_schedule("eps", eps)
@@ -192,22 +195,45 @@ class Optimizer(object):
         self.use_radam = use_radam
         self.L2_is_weight_decay = L2_is_weight_decay
         self._radam_buffer = [[None, None, None] for _ in range(10)]
+        self._registered_params: Dict[KeyT, OptimizerParamInfo] = {}
 
-    def _set_attr_or_schedule(self, name, value):
-        if isinstance(value, (float, bool, int)):
-            setattr(self, name, constant(value))
-        elif isinstance(value, list):
-            value = iter(value)
-            setattr(self, name, _wrap_generator(name, value))
-        elif isinstance(value, GeneratorType):
-            setattr(self, name, _wrap_generator(name, value))
-        elif isinstance(value, Schedule):
-            setattr(self, name, value)
-        else:
-            err = f"Invalid schedule for '{name}' ({type(value)})"
-            raise ValueError(err)
+    def initialize(self, initial_params: Iterable[OptimizerParamInfo]) -> None:
+        # No-op since we'll be registering parameters on-the-fly in `Model.finish_update()`
+        pass
 
-    def step_schedules(self):
+    def register_param(
+        self, param: OptimizerParamInfo, overwrite: bool = False
+    ) -> None:
+        if param.key in self._registered_params and not overwrite:
+            return
+        elif param.gradient is None:
+            return
+
+        if not is_xp_array(param.parameter) or not is_xp_array(param.gradient):
+            raise ValueError(
+                "Thinc optimizer only supports weights and gradients stored in XP tensors"
+            )
+
+        self._registered_params[param.key] = param
+
+    def step(self) -> None:
+        for param in self._registered_params.values():
+            assert param.gradient is not None
+
+            # TODO use a `with_options` block to use per-param specific
+            # options like learning rate, etc
+            updated_parameter, updated_grads = self(
+                param.key, param.parameter, param.gradient
+            )
+
+            if param.update_callback is not None:
+                param.update_callback(updated_parameter)
+
+        # Parameter registrations are ephemeral, i.e., we don't track parameters
+        # between steps. This helps prevent any kind of divergence between the
+        # tracked parameters and the actual ones in the models.
+        self._registered_params.clear()
+
         self._step += 1
 
     @property
@@ -219,18 +245,19 @@ class Optimizer(object):
         self._last_score = (self._step, score)
 
     @property
-    def step(self) -> int:
+    def current_step(self) -> int:
         return self._step
 
-    def _schedule_args(self, key: KeyT) -> Dict[str, Any]:
-        return {
-            "key": key,
-            "last_score": self.last_score,
-        }
+    @property
+    def averages(self):
+        return self._averages
+
+    def learn_rate(self, step: int, **extra) -> float:
+        return self._learn_rate(step=step, **extra)
 
     def __call__(
         self,
-        key: Tuple[int, str],
+        key: KeyT,
         weights: FloatsXd,
         gradient: FloatsXd,
         *,
@@ -247,40 +274,47 @@ class Optimizer(object):
         nr_upd = self.nr_update[key]
         schedule_args = self._schedule_args(key)
 
-        if self.L2(self.step, **schedule_args) != 0 and not self.L2_is_weight_decay:
-            gradient += self.L2(self.step, **schedule_args) * weights
-        if self.grad_clip(self.step, **schedule_args):
+        if (
+            self.L2(self.current_step, **schedule_args) != 0
+            and not self.L2_is_weight_decay
+        ):
+            gradient += self.L2(self.current_step, **schedule_args) * weights
+        if self.grad_clip(self.current_step, **schedule_args):
             gradient = ops.clip_gradient(
                 gradient,
-                self.grad_clip(self.step, **schedule_args),
+                self.grad_clip(self.current_step, **schedule_args),
             )
         if self.use_radam:
             weights, gradient = self._radam(
                 ops, weights, gradient, lr_scale, key, nr_upd
             )
         elif (
-            self.b1(self.step, **schedule_args) > 0.0
-            and self.b2(self.step, **schedule_args) > 0.0
+            self.b1(self.current_step, **schedule_args) > 0.0
+            and self.b2(self.current_step, **schedule_args) > 0.0
         ):
             weights, gradient = self._adam(
                 ops, weights, gradient, lr_scale, key, nr_upd
             )
-        elif self.b2(self.step, **schedule_args) > 0.0:  # pragma: no cover
+        elif self.b2(self.current_step, **schedule_args) > 0.0:  # pragma: no cover
             raise NotImplementedError  # TODO: error message
         else:
-            weights -= lr_scale * self.learn_rate(self.step, **schedule_args) * gradient
-        gradient *= 0
-        if self.L2(self.step, **schedule_args) != 0 and self.L2_is_weight_decay:
             weights -= (
                 lr_scale
-                * self.learn_rate(self.step, **schedule_args)
-                * self.L2(self.step, **schedule_args)
+                * self._learn_rate(self.current_step, **schedule_args)
+                * gradient
+            )
+        gradient *= 0
+        if self.L2(self.current_step, **schedule_args) != 0 and self.L2_is_weight_decay:
+            weights -= (
+                lr_scale
+                * self._learn_rate(self.current_step, **schedule_args)
+                * self.L2(self.current_step, **schedule_args)
                 * weights
             )
-        if self.averages is not None:
-            if key not in self.averages:
-                self.averages[key] = ops.alloc(weights.shape, dtype="float32")
-            ops.update_averages(self.averages[key], weights, nr_upd)
+        if self._averages is not None:
+            if key not in self._averages:
+                self._averages[key] = ops.alloc(weights.shape, dtype="float32")
+            ops.update_averages(self._averages[key], weights, nr_upd)
         return weights, gradient
 
     def _radam(self, ops, weights, grad, lr_scale, key, nr_upd):
@@ -302,12 +336,12 @@ class Optimizer(object):
             "exp_avg_sq": self.mom2[key],
         }
         group = {
-            "lr": self.learn_rate(self.step, **schedule_args),
+            "lr": self._learn_rate(self.current_step, **schedule_args),
             "betas": [
-                self.b1(self.step, **schedule_args),
-                self.b2(self.step, **schedule_args),
+                self.b1(self.current_step, **schedule_args),
+                self.b2(self.current_step, **schedule_args),
             ],
-            "eps": self.eps(self.step, **schedule_args),
+            "eps": self.eps(self.current_step, **schedule_args),
             "weight_decay": 0.0,
             "buffer": self._radam_buffer,
         }
@@ -378,12 +412,12 @@ class Optimizer(object):
             self.mom2[key] = ops.alloc1f(weights.size)
         mom1 = self.mom1[key]
         mom2 = self.mom2[key]
-        b1 = self.b1(self.step, **schedule_args)
-        b2 = self.b2(self.step, **schedule_args)
+        b1 = self.b1(self.current_step, **schedule_args)
+        b2 = self.b2(self.current_step, **schedule_args)
         fix1 = 1.0 - (b1**nr_upd)
         fix2 = 1.0 - (b2**nr_upd)
-        lr = self.learn_rate(self.step, **schedule_args) * fix2**0.5 / fix1
-        eps = self.eps(self.step, **schedule_args)
+        lr = self._learn_rate(self.current_step, **schedule_args) * fix2**0.5 / fix1
+        eps = self.eps(self.current_step, **schedule_args)
         # needs to be 1D going into the adam function
         weights_1D, gradient_1D, mom1, mom2 = ops.adam(
             weights_1D, gradient_1D, mom1, mom2, b1, b2, eps, lr * lr_scale
@@ -394,6 +428,26 @@ class Optimizer(object):
             ops.reshape_f(weights_1D, weights.shape),
             ops.reshape_f(gradient_1D, gradient.shape),
         )
+
+    def _set_attr_or_schedule(self, name, value):
+        if isinstance(value, (float, bool, int)):
+            setattr(self, name, constant(value))
+        elif isinstance(value, list):
+            value = iter(value)
+            setattr(self, name, _wrap_generator(name, value))
+        elif isinstance(value, GeneratorType):
+            setattr(self, name, _wrap_generator(name, value))
+        elif isinstance(value, Schedule):
+            setattr(self, name, value)
+        else:
+            err = f"Invalid schedule for '{name}' ({type(value)})"
+            raise ValueError(err)
+
+    def _schedule_args(self, key: KeyT) -> Dict[str, Any]:
+        return {
+            "key": key,
+            "last_score": self.last_score,
+        }
 
 
 def _wrap_generator(attr_name: str, generator: Generator) -> Schedule[Any]:
@@ -441,4 +495,4 @@ def _wrap_generator_schedule(schedule: Schedule, step, **kwargs) -> float:
     return value
 
 
-__all__ = ["Adam", "RAdam", "SGD", "Optimizer", "ADAM_DEFAULTS", "SGD_DEFAULTS"]
+__all__ = ["Adam", "RAdam", "SGD", "ThincOptimizer", "ADAM_DEFAULTS", "SGD_DEFAULTS"]
