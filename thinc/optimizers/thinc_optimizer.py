@@ -1,18 +1,16 @@
 from typing import Any, Dict, Iterable, Optional, Union, Tuple, List, cast
 from collections import defaultdict
-import itertools
 import math
-from types import GeneratorType
 
 from .types import KeyT, ScheduleT
 from .abc import Optimizer
 from .param import OptimizerParamInfo
+from .util import convert_to_schedule
 
 from ..backends import get_array_ops
 from ..types import Generator, FloatsXd
 from ..config import registry
-from ..schedules import constant, Schedule
-from ..util import is_xp_array
+from ..schedules import Schedule
 
 
 SGD_DEFAULTS: Dict[str, Union[float, bool, int]] = {
@@ -198,41 +196,45 @@ class ThincOptimizer(Optimizer):
         self._registered_params: Dict[KeyT, OptimizerParamInfo] = {}
 
     def initialize(self, initial_params: Iterable[OptimizerParamInfo]) -> None:
-        # No-op since we'll be registering parameters on-the-fly in `Model.finish_update()`
-        pass
+        # No-op since we'll be registering parameters on-the-fly in `Model.finish_update()`.
+        assert len(self._registered_params) == 0
 
     def register_param(
         self, param: OptimizerParamInfo, overwrite: bool = False
     ) -> None:
-        if param.key in self._registered_params and not overwrite:
-            return
-        elif param.gradient is None:
-            return
-
-        if not is_xp_array(param.parameter) or not is_xp_array(param.gradient):
+        if param.gradient is None:
+            raise ValueError("Missing gradient tensor for parameter")
+        elif not param.from_xp:
             raise ValueError(
                 "Thinc optimizer only supports weights and gradients stored in XP tensors"
             )
-
-        self._registered_params[param.key] = param
+        existing = self._registered_params.get(param.key)
+        if existing is None or overwrite:
+            self._registered_params[param.key] = param
+        elif id(existing.parameter) != id(param.parameter) or id(
+            existing.gradient
+        ) != id(param.gradient):
+            raise ValueError(
+                "Attempting to re-register a Thinc parameter with a different backing store "
+                "than the one found in the previous registration"
+            )
+        else:
+            # Already registered, so it's a no-op.
+            pass
 
     def step(self) -> None:
         for param in self._registered_params.values():
             assert param.gradient is not None
 
-            # TODO use a `with_options` block to use per-param specific
-            # options like learning rate, etc
+            # The parameters and gradients are updated in-place.
             updated_parameter, updated_grads = self(
                 param.key, param.parameter, param.gradient
             )
 
+            # ops = get_array_ops(updated_parameter)
+            # ops.xp.testing.assert_allclose(updated_parameter, param.parameter)
             if param.update_callback is not None:
-                param.update_callback(updated_parameter)
-
-        # Parameter registrations are ephemeral, i.e., we don't track parameters
-        # between steps. This helps prevent any kind of divergence between the
-        # tracked parameters and the actual ones in the models.
-        self._registered_params.clear()
+                param.update_callback(param.parameter)
 
         self._step += 1
 
@@ -430,69 +432,14 @@ class ThincOptimizer(Optimizer):
         )
 
     def _set_attr_or_schedule(self, name, value):
-        if isinstance(value, (float, bool, int)):
-            setattr(self, name, constant(value))
-        elif isinstance(value, list):
-            value = iter(value)
-            setattr(self, name, _wrap_generator(name, value))
-        elif isinstance(value, GeneratorType):
-            setattr(self, name, _wrap_generator(name, value))
-        elif isinstance(value, Schedule):
-            setattr(self, name, value)
-        else:
-            err = f"Invalid schedule for '{name}' ({type(value)})"
-            raise ValueError(err)
+        schedule = convert_to_schedule(value, name)
+        setattr(self, name, schedule)
 
     def _schedule_args(self, key: KeyT) -> Dict[str, Any]:
         return {
-            "key": key,
+            "key": key,  # TODO we never use this in any schedule. can be removed?
             "last_score": self.last_score,
         }
-
-
-def _wrap_generator(attr_name: str, generator: Generator) -> Schedule[Any]:
-    try:
-        peek = next(generator)
-    except (StopIteration, TypeError) as e:
-        err = f"Invalid schedule for '{attr_name}' ({type(generator)})\n{e}"
-        raise ValueError(err)
-    return Schedule(
-        "wrap_generator",
-        _wrap_generator_schedule,
-        attrs={
-            "attr_name": attr_name,
-            "last_step": -1,
-            "last_value": peek,
-            "generator": itertools.chain([peek], generator),
-        },
-    )
-
-
-def _wrap_generator_schedule(schedule: Schedule, step, **kwargs) -> float:
-    attr_name = schedule.attrs["attr_name"]
-    last_step = schedule.attrs["last_step"]
-    last_value = schedule.attrs["last_value"]
-    generator = schedule.attrs["generator"]
-
-    if step < last_step:
-        raise ValueError(
-            f"'step' of the generator-based schedule for {attr_name} must not decrease"
-        )
-
-    # Ensure that we have a value when we didn't step or when the
-    # generator is exhausted.
-    value = last_value
-
-    for i in range(step - last_step):
-        try:
-            value = next(generator)
-        except StopIteration:  # schedule exhausted, use last value
-            break
-
-    schedule.attrs["last_step"] = step
-    schedule.attrs["last_value"] = value
-
-    return value
 
 
 __all__ = ["Adam", "RAdam", "SGD", "ThincOptimizer", "ADAM_DEFAULTS", "SGD_DEFAULTS"]

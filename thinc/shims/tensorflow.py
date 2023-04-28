@@ -166,7 +166,8 @@ class TensorFlowShim(Shim):
             grad=xp.concatenate(grads),
             update_callback=param_update_callback,
         )
-        optimizer.register_param(param_info)
+        # Overwrite any existing registrations as we allocate a new buffer tensor every call.
+        optimizer.register_param(param_info, overwrite=True)
 
     def _load_weights_from_state_dict(
         self, state_dict: Optional[Dict[str, ArrayXd]] = None

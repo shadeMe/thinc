@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 
 from typing import (
+    Any,
     Dict,
     Iterable,
     Optional,
@@ -15,9 +16,12 @@ from .types import KeyT
 
 class Optimizer(ABC):
     @abstractmethod
-    def initialize(self, initial_params: Iterable[OptimizerParamInfo]) -> None:
-        """Called once before the training loop starts. This method can be used to register
-        already-initialized parameters with the optimizer and any custom options they may need.
+    def initialize(
+        self,
+        initial_params: Iterable[OptimizerParamInfo],
+    ) -> None:
+        """Called once before the training loop starts to register already-initialized parameters,
+        if any.
         """
         pass
 
@@ -31,6 +35,8 @@ class Optimizer(ABC):
         registration for the given key is replaced with the one passed to the method.
         """
         pass
+
+    # TODO add a method to register multiple params as a single group (for performance)
 
     @abstractmethod
     def step(self) -> None:

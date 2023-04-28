@@ -1,11 +1,12 @@
 from dataclasses import dataclass
-
 from typing import (
     Any,
     Callable,
     Dict,
     Optional,
 )
+
+from ..util import is_torch_array, is_xp_array
 
 from .types import KeyT
 
@@ -23,8 +24,6 @@ class OptimizerParamInfo:
     # Can be `None` for parameters that lazily initialize their gradients.
     # Modified in-place during an optimizer update step.
     gradient: Optional[Any]
-    # Custom optimizer options for this parameter.
-    custom_options: Dict[str, Any]
     # Optional callback that is invoked after each optimizer update step.
     # Args: The parameter object (after the update).
     update_callback: Optional[Callable[[Any], None]]
@@ -35,11 +34,27 @@ class OptimizerParamInfo:
         param: Any,
         *,
         grad: Optional[Any] = None,
-        custom_options: Optional[Dict[str, Any]] = None,
         update_callback: Optional[Callable[[Any], None]] = None,
     ):
         self.key = key
         self.parameter = param
         self.gradient = grad
-        self.custom_options = dict() if custom_options is None else custom_options
         self.update_callback = update_callback
+
+    @property
+    def from_torch(self) -> bool:
+        if self.gradient is None:
+            return is_torch_array(self.parameter)
+        else:
+            return is_torch_array(self.parameter) and is_torch_array(self.gradient)
+
+    @property
+    def from_thinc(self) -> bool:
+        if self.gradient is None:
+            return is_xp_array(self.parameter)
+        else:
+            return is_xp_array(self.parameter) and is_xp_array(self.gradient)
+
+    @property
+    def from_xp(self) -> bool:
+        return self.from_thinc

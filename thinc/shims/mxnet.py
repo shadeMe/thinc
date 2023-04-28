@@ -81,7 +81,8 @@ class MXNetShim(Shim):
             grad=xp.concatenate(grads),
             update_callback=param_update_callback,
         )
-        optimizer.register_param(param_info)
+        # Overwrite any existing registrations as we allocate a new buffer tensor every call.
+        optimizer.register_param(param_info, overwrite=True)
 
     def copy(self, ctx: "mx.context.Context" = None):
         if ctx is None:

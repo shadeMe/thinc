@@ -393,17 +393,24 @@ def xp2torch(
     if device is None:
         device = get_torch_default_device()
 
+    no_copy_msg = "Cannot convert XP tensor to Torch tensor without copying"
+
     if hasattr(xp_tensor, "toDlpack"):
         dlpack_tensor = xp_tensor.toDlpack()  # type: ignore
         torch_tensor = torch.utils.dlpack.from_dlpack(dlpack_tensor)
     elif hasattr(xp_tensor, "__dlpack__"):
         torch_tensor = torch.utils.dlpack.from_dlpack(xp_tensor)
     elif not allow_copy:
-        raise ValueError("Cannot convert XP tensor to Torch tensor without copying")
+        raise ValueError(no_copy_msg)
     else:
         torch_tensor = torch.from_numpy(xp_tensor)
 
     torch_tensor = torch_tensor.to(device)
+    if not allow_copy:
+        if is_numpy_array(xp_tensor) and device.type != "cpu":
+            raise ValueError(no_copy_msg)
+        elif is_cupy_array(xp_tensor) and not device.type.startswith("cuda"):
+            raise ValueError(no_copy_msg)
 
     if requires_grad:
         torch_tensor.requires_grad_()

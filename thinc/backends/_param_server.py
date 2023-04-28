@@ -58,12 +58,14 @@ class ParamServer:
         self._params[(model_id, name)] = value
 
     def set_grad(self, model_id: int, name: str, value: FloatsXd) -> None:
+        # TODO compare grad and param shapes
         if self.proxy is not None:
             self.proxy.set_grad(model_id, name, value)
         else:
             self._grads[(model_id, name)] = value
 
     def inc_grad(self, model_id: int, name: str, value: FloatsXd) -> None:
+        # TODO compare grad and param shapes
         key = (model_id, name)
         if self.proxy is not None:
             self.proxy.inc_grad(model_id, name, value)

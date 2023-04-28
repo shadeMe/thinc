@@ -178,7 +178,7 @@ class PyTorchShim(Shim):
                             param_update_callback, torch_data=torch_data
                         ),
                     )
-                    optimizer.register_param(param_info)
+                    optimizer.register_param(param_info, overwrite=True)
                 else:
                     torch_data.grad.zero_()
 
