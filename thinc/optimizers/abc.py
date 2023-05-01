@@ -37,6 +37,8 @@ class Optimizer(ABC):
         pass
 
     # TODO add a method to register multiple params as a single group (for performance)
+    # TODO perhaps a method that returns the allowed tensor types ("xp", "torch", etc)?
+    # this will let callers decide if they should wrap their parameters before registration
 
     @abstractmethod
     def step(self) -> None:

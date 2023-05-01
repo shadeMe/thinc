@@ -4,31 +4,41 @@ import sys
 
 from .abc import Optimizer
 from .param import OptimizerParamInfo
-from .types import KeyT
-from .util import convert_to_schedule
+from .types import KeyT, ScheduleT, InvokableScheduleT
+from .util import convert_to_schedule, invoke_schedule
 from .thinc_optimizer import ADAM_DEFAULTS
 
 from ..backends import get_array_ops
 from ..compat import torch
 from ..config import registry
 from ..schedules import Schedule
-from ..util import xp2torch, assert_pytorch_installed
+from ..util import (
+    xp2torch,
+    assert_pytorch_installed,
+    current_ops_supports_cuda,
+    use_nvtx_range,
+)
 from ..types import FloatsXd
 
 
 @registry.optimizers("TorchAdam.v1")
 def TorchAdam(
-    learn_rate: float = ADAM_DEFAULTS["learn_rate"],
+    learn_rate: ScheduleT = ADAM_DEFAULTS["learn_rate"],
     *,
-    L2: float = ADAM_DEFAULTS["L2"],
-    beta1: float = ADAM_DEFAULTS["beta1"],
-    beta2: float = ADAM_DEFAULTS["beta2"],
-    eps: float = ADAM_DEFAULTS["eps"],
+    L2: ScheduleT = ADAM_DEFAULTS["L2"],
+    beta1: ScheduleT = ADAM_DEFAULTS["beta1"],
+    beta2: ScheduleT = ADAM_DEFAULTS["beta2"],
+    eps: ScheduleT = ADAM_DEFAULTS["eps"],
     grad_clip: float = ADAM_DEFAULTS["grad_clip"],
     L2_is_weight_decay: bool = cast(bool, ADAM_DEFAULTS["L2_is_weight_decay"]),
     use_averages: bool = True,
 ):
-    kwargs = {"lr": learn_rate, "betas": (beta1, beta2), "eps": eps, "weight_decay": L2}
+    kwargs = {
+        "lr": learn_rate,
+        "betas": (beta1, beta2),
+        "eps": eps,
+        "weight_decay": L2,
+    }
     factory = torch.optim.AdamW if L2_is_weight_decay else torch.optim.Adam
     return TorchOptimizer(
         factory, kwargs, grad_clip=grad_clip, use_averages=use_averages
@@ -64,13 +74,13 @@ class _TrackedParam:
 
 
 class TorchOptimizer(Optimizer):
+    _OPTIMIZER_PARAM_GROUP_TAG_SENTINEL = "__sentinel__"
     _OPTIMIZER_PARAM_GROUP_TAG_KEY = "__tracked_key__"
-    _OPTIMIZER_PARAM_GROUP_TAG_DELETED = "__deleted_param__"
 
     _optimizer: "torch.optim.Optimizer"
     _tracked_params: Dict[KeyT, _TrackedParam]
     _per_param_group_options: Dict[str, Dict[str, Schedule]]
-    _default_options: Dict[str, Schedule]
+    _default_options: Dict[str, InvokableScheduleT]
     _current_step: int
     _last_score: Optional[Tuple[int, float]]
     _averages: Optional[Dict[KeyT, FloatsXd]]
@@ -97,17 +107,22 @@ class TorchOptimizer(Optimizer):
         self._grad_clip = grad_clip
 
         optimizer_kwargs = {
-            k: v(self._current_step, **{"last_score": self._last_score})
+            k: invoke_schedule(
+                v, self._current_step, **{"last_score": self._last_score}
+            )
             for k, v in self._default_options.items()
         }
         self._optimizer = optimizer_factory(
             [
                 {
-                    "params": torch.zeros(1),
+                    "params": torch.zeros(1).cuda()
+                    if current_ops_supports_cuda()
+                    else torch.zeros(1),
                     self._OPTIMIZER_PARAM_GROUP_TAG_KEY: (
                         -sys.maxsize + 1,
-                        "__sentinel__",
+                        self._OPTIMIZER_PARAM_GROUP_TAG_SENTINEL,
                     ),
+                    self._OPTIMIZER_PARAM_GROUP_TAG_SENTINEL: 0,
                 }
             ],  # Use a dummy, no-grad parameter to initialize the optimizer.
             **optimizer_kwargs,
@@ -133,11 +148,12 @@ class TorchOptimizer(Optimizer):
             )
 
     def step(self) -> None:
-        self._clip_gradients()
-        self._optimizer.step()
-        self._perform_post_update_fixups()
-        self._step_schedules()
-        self._update_averages()
+        with use_nvtx_range("torch optimizer step"):
+            self._clip_gradients()
+            self._optimizer.step()
+            self._perform_post_update_fixups()
+            self._step_schedules()
+            self._update_averages()
 
     def __call__(
         self,
@@ -166,7 +182,9 @@ class TorchOptimizer(Optimizer):
         return self._averages
 
     def learn_rate(self, step: int, **extra) -> float:
-        return self._default_options["lr"](step=step, **extra)
+        return invoke_schedule(
+            self._default_options["lr"], step=step, **extra
+        )  # type:ignore
 
     def _step_schedules(self):
         # Since torch learning rate schedulers are only able to work on all parameter
@@ -178,20 +196,20 @@ class TorchOptimizer(Optimizer):
             "last_score": self.last_score,
         }
         for param_group in self._optimizer.param_groups:
-            if self._OPTIMIZER_PARAM_GROUP_TAG_DELETED in param_group:
+            if not self._is_valid_param_group(param_group):
                 continue
 
             key = param_group.get(self._OPTIMIZER_PARAM_GROUP_TAG_KEY)
-            tracked_param = self._tracked_params.get(key)
-            assert tracked_param is None
+            assert key is not None
 
             schedule_source = self._default_options
+            # XXX We can also use regexps for matching the tags with the param names
             if key[1] in self._per_param_group_options:
                 schedule_source = self._per_param_group_options[key[1]]
 
             for name, schedule in schedule_source.items():
                 assert name in param_group
-                new_val = schedule(self._current_step, **schedule_args)
+                new_val = invoke_schedule(schedule, self._current_step, **schedule_args)
                 param_group[name] = new_val
 
     def _perform_post_update_fixups(self):
@@ -208,7 +226,7 @@ class TorchOptimizer(Optimizer):
         # reset the gradient tensors of those parameters.
         self._optimizer.zero_grad(set_to_none=False)
         for param_group in self._optimizer.param_groups:
-            if self._OPTIMIZER_PARAM_GROUP_TAG_DELETED in param_group:
+            if not self._is_valid_param_group(param_group):
                 continue
 
             key = param_group.get(self._OPTIMIZER_PARAM_GROUP_TAG_KEY)
@@ -235,6 +253,8 @@ class TorchOptimizer(Optimizer):
         # backprop?
         # c.f https://stackoverflow.com/questions/54716377/how-to-do-gradient-clipping-in-pytorch
         for group in self._optimizer.param_groups:
+            if not self._is_valid_param_group(group):
+                continue
             for p in group["params"]:
                 torch.nn.utils.clip_grad_norm_(p, self._grad_clip)
 
@@ -254,6 +274,12 @@ class TorchOptimizer(Optimizer):
                 ops.update_averages(
                     self.averages[key], weights, tracked_param.num_updates
                 )
+
+    def _is_valid_param_group(self, param_group: Dict[str, Any]) -> bool:
+        if self._OPTIMIZER_PARAM_GROUP_TAG_SENTINEL in param_group:
+            return False
+        else:
+            return True
 
     def _register_torch_param(
         self,
@@ -287,11 +313,21 @@ class TorchOptimizer(Optimizer):
     ):
         if param.gradient is None:
             raise ValueError("Missing gradient tensor for Thinc parameter")
+        elif param.gradient.shape != param.parameter.shape:
+            raise ValueError(
+                f"Mismatching shapes of parameter (`{param.parameter.shape}`) "
+                f"and gradient (`{param.gradient.shape}`) tensors"
+            )
 
         existing = self._tracked_params.get(param.key)
-        if existing is not None:
+        if existing is None:
+            assert param.key not in self._tracked_params
+            tracked_param = _TrackedParam(param)
+            self._tracked_params[param.key] = tracked_param
+            self._add_param_to_optimizer(tracked_param)
+        else:
             if overwrite:
-                self._deregister_param(param.key)
+                self._overwrite_param(param)
             elif id(existing.source.parameter) != id(param.parameter) or id(
                 existing.source.gradient
             ) != id(param.gradient):
@@ -301,19 +337,37 @@ class TorchOptimizer(Optimizer):
                 )
             else:
                 # Already registered, so it's a no-op.
-                return
+                pass
 
-        assert param.key not in self._tracked_params
-        tracked_param = _TrackedParam(param)
-        self._tracked_params[param.key] = tracked_param
-        self._add_param_to_optimizer(tracked_param)
-
-    def _deregister_param(self, key: KeyT):
-        tracked_param = self._tracked_params.get(key)
+    def _overwrite_param(self, param: OptimizerParamInfo):
+        tracked_param = self._tracked_params.get(param.key)
         assert tracked_param is not None
+        assert (
+            tracked_param.source.from_torch == param.from_torch
+            and tracked_param.source.from_thinc == param.from_thinc
+        ), "Attempting to overwrite a tracked parameter with another that "
+        "has the same key but different provenance"
 
-        self._remove_param_from_optimizer(tracked_param)
-        del self._tracked_params[key]
+        # We'll simply overwrite the tensors in the corresponding
+        # param group and update our tracked state. This will let
+        # us preserve the corresponding parameter's optimizer state
+        # such as momentum. This also means that we need to make sure
+        # that the incoming tensors are of the same shape as the
+        # tracked ones.
+        if tracked_param.param.shape != param.parameter.shape:
+            raise ValueError(
+                f"Attempting to overwrite a tracked parameter of shape `{tracked_param.param.shape}` "
+                f"with a differently shaped parameter (`{param.parameter.shape}`)"
+            )
+
+        replacement = _TrackedParam(param)
+        replacement.num_updates = tracked_param.num_updates
+        self._tracked_params[param.key] = replacement
+        self._replace_param_in_optimizer(replacement)
+
+        del tracked_param.param
+        del tracked_param.grad
+        tracked_param.param = tracked_param.grad = None
 
     def _add_param_to_optimizer(self, param: _TrackedParam):
         assert param.param.requires_grad and param.param.grad is not None
@@ -323,6 +377,7 @@ class TorchOptimizer(Optimizer):
         # TODO check if this has a performance impact. The CPU kernels
         # for commmon optimizers seem to be iterating using a loop, but
         # fused implementations could suffer.
+        # Yeah, setting `Fused=True` runs slower than the for-loop impl. Same with foreach.
         self._optimizer.add_param_group(
             {
                 "params": param.param,
@@ -332,27 +387,26 @@ class TorchOptimizer(Optimizer):
             }
         )
 
-    def _remove_param_from_optimizer(self, param: _TrackedParam):
-        # We can't directly remove a param group from the optimizer as
-        # it can be using adjacent lists to track state like momentum.
-        # So, we'll just "freeze" them by disabling their gradient, which
-        # will cause them to be ignored by the optimizer.
-        # https://discuss.pytorch.org/t/delete-parameter-group-from-optimizer/46814/8
+    def _replace_param_in_optimizer(self, param: _TrackedParam):
         assert param.param.requires_grad
 
+        found = False
         for param_group in self._optimizer.param_groups:
             key = param_group.get(self._OPTIMIZER_PARAM_GROUP_TAG_KEY)
             assert key is not None
             if param.source.key == key:
-                assert self._OPTIMIZER_PARAM_GROUP_TAG_DELETED not in param_group
-
                 tensors: List["torch.Tensor"] = param_group["params"]
                 assert len(tensors) == 1
                 tensor = tensors[0]
                 assert tensor.grad is not None
-                tensor.grad.zero_()
                 tensor.requires_grad_(False)
                 tensor.grad = None
-                param_group[self._OPTIMIZER_PARAM_GROUP_TAG_DELETED] = True
 
+                state_data = self._optimizer.state.get(tensor)
+                assert state_data is not None
+                self._optimizer.state[param.param] = state_data
+
+                param_group["params"] = [param.param]
+                found = True
                 break
+        assert found

@@ -53,6 +53,14 @@ def get_torch_default_device() -> "torch.device":
     return torch.device("cpu")
 
 
+def current_ops_supports_cuda() -> bool:
+    from .backends import get_current_ops
+    from .backends.cupy_ops import CupyOps
+
+    ops = get_current_ops()
+    return isinstance(ops, CupyOps)
+
+
 def get_array_module(arr):  # pragma: no cover
     if is_numpy_array(arr):
         return numpy

@@ -1,13 +1,22 @@
 import itertools
 from types import GeneratorType
-from typing import Any, Generator
+from typing import Any, Generator, Tuple, Union
 
 from ..schedules import constant, Schedule
 
-from .types import ScheduleT
+from .types import InvokableScheduleT, ScheduleT
 
 
-def convert_to_schedule(schedulable: ScheduleT, name: str) -> Schedule[Any]:
+def is_convertable_to_schedule(schedulable: Any) -> bool:
+    if isinstance(schedulable, (float, bool, int, list)):
+        return True
+    elif isinstance(schedulable, (GeneratorType, Schedule)):
+        return True
+    else:
+        return False
+
+
+def convert_to_schedule(schedulable: ScheduleT, name: str) -> InvokableScheduleT:
     if isinstance(schedulable, (float, bool, int)):
         return constant(schedulable)
     elif isinstance(schedulable, list):
@@ -17,9 +26,29 @@ def convert_to_schedule(schedulable: ScheduleT, name: str) -> Schedule[Any]:
         return _wrap_generator_as_schedule(name, schedulable)
     elif isinstance(schedulable, Schedule):
         return schedulable
+    elif isinstance(schedulable, tuple) and all(
+        (is_convertable_to_schedule(x) for x in schedulable)
+    ):
+        # Special case for torch optimizer options that store values in tuples.
+        return tuple(convert_to_schedule(x, name) for x in schedulable)  # type:ignore
     else:
-        err = f"Invalid schedule for '{name}' ({type(schedulable)})"
-        raise ValueError(err)
+        raise ValueError(f"Invalid schedule for '{name}' ({type(schedulable)})")
+
+
+def invoke_schedule(
+    schedulable: InvokableScheduleT, step: int, **schedule_args
+) -> Union[Any, Tuple[Any, ...]]:
+    if isinstance(schedulable, Schedule):
+        return schedulable(step=step, **schedule_args)
+    elif isinstance(schedulable, tuple) and all(
+        (isinstance(x, Schedule) for x in schedulable)
+    ):
+        return tuple(s(step=step, **schedule_args) for s in schedulable)
+    else:
+        raise ValueError(
+            "Attempting to invoke a schedule that is neither a `Schedule` nor "
+            "a `Tuple[Schedule, ...]"
+        )
 
 
 def _wrap_generator_as_schedule(attr_name: str, generator: Generator) -> Schedule[Any]:

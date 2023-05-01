@@ -167,9 +167,16 @@ class PyTorchShim(Shim):
 
         for name, torch_data in self._model.named_parameters():
             if torch_data.grad is not None:
-                if (
-                    not self._grad_scaler.found_inf
-                ):  # Skip weight update if any gradient overflowed.
+                # Skip weight update if any gradient overflowed.
+                if not self._grad_scaler.found_inf:
+                    # XXX the overwrites come at a cost when using the torch optimizer
+                    # as we need to lookup and release the old tensor( wrapper)s.
+                    # We can avoid this by directly passing the torch tensor to the
+                    # optimizer, but this means we'll need some way to communicate this
+                    # to the caller.
+                    # TODO maybe the optimizer interface exposes a "allowed_tensor_types()"
+                    # that returns "xp", "torch", etc? the shim can then choose to pass
+                    # wrappers or the original tensors
                     param_info = OptimizerParamInfo(
                         (self.id, name),
                         param=torch2xp(torch_data.data),

@@ -6,4 +6,5 @@ from ..schedules import Schedule
 # Uniquely identifies a parameter tracked by the optimizer.
 KeyT = Tuple[int, str]
 
-ScheduleT = Union[float, List[float], Generator, Schedule]
+ScheduleT = Union[float, List[float], Generator, Schedule, Tuple[Schedule, ...]]
+InvokableScheduleT = Union[Schedule, Tuple[Schedule, ...]]

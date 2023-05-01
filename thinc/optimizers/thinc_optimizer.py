@@ -11,6 +11,7 @@ from ..backends import get_array_ops
 from ..types import Generator, FloatsXd
 from ..config import registry
 from ..schedules import Schedule
+from ..util import use_nvtx_range
 
 
 SGD_DEFAULTS: Dict[str, Union[float, bool, int]] = {
@@ -204,6 +205,11 @@ class ThincOptimizer(Optimizer):
     ) -> None:
         if param.gradient is None:
             raise ValueError("Missing gradient tensor for parameter")
+        elif param.gradient.shape != param.parameter.shape:
+            raise ValueError(
+                f"Mismatching shapes of parameter (`{param.parameter.shape}`) "
+                f"and gradient (`{param.gradient.shape}`) tensors"
+            )
         elif not param.from_xp:
             raise ValueError(
                 "Thinc optimizer only supports weights and gradients stored in XP tensors"
@@ -223,20 +229,21 @@ class ThincOptimizer(Optimizer):
             pass
 
     def step(self) -> None:
-        for param in self._registered_params.values():
-            assert param.gradient is not None
+        with use_nvtx_range("thinc optimizer step"):
+            for param in self._registered_params.values():
+                assert param.gradient is not None
 
-            # The parameters and gradients are updated in-place.
-            updated_parameter, updated_grads = self(
-                param.key, param.parameter, param.gradient
-            )
+                # The parameters and gradients are updated in-place.
+                updated_parameter, updated_grads = self(
+                    param.key, param.parameter, param.gradient
+                )
 
-            # ops = get_array_ops(updated_parameter)
-            # ops.xp.testing.assert_allclose(updated_parameter, param.parameter)
-            if param.update_callback is not None:
-                param.update_callback(param.parameter)
+                # ops = get_array_ops(updated_parameter)
+                # ops.xp.testing.assert_allclose(updated_parameter, param.parameter)
+                if param.update_callback is not None:
+                    param.update_callback(param.parameter)
 
-        self._step += 1
+            self._step += 1
 
     @property
     def last_score(self) -> Optional[Tuple[int, float]]:
